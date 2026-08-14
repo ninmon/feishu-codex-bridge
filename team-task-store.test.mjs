@@ -189,3 +189,40 @@ test("migrates legacy schema without treating remote Project IDs as authority", 
     await fs.rm(directory, { recursive: true, force: true });
   }
 });
+
+test("persists project-scoped Coordinator authority and separates base Git from the execution branch", async () => fixture(async (store) => {
+  const request = createAgentEvent({
+    kind: "task.request",
+    taskId: "task:PROJECT01",
+    groupChatId,
+    githubRepository,
+    fromAgentId: "alice-codex",
+    toAgentId: "local-codex",
+    requesterAgentId: "alice-codex",
+    executorAgentId: "local-codex",
+    collaborationProjectId: "bridge-team",
+    coordinatorAgentId: "alice-codex",
+    coordinatorEpoch: 2,
+    payload: {
+      title: "Project task",
+      prompt: "Implement the approved project task.",
+      receiveMode: "recommend",
+      resultMode: "notify",
+      git: { remote: "origin", branch: "main", commit: "3".repeat(40) },
+      targetBranch: "task/T-002",
+      acceptanceCriteria: ["Tests pass"],
+      evidenceRequired: ["node --test"],
+      reviewerAgentId: "reviewer-codex",
+    },
+  }, { now, ttlMs: 60_000 });
+  const recorded = await store.recordInboundEvent(request, {
+    peer: alice,
+    chatId: groupChatId,
+    localProjectId: "local-project",
+  });
+  assert.equal(recorded.task.branch, "task/T-002");
+  assert.equal(recorded.task.requestGit.branch, "main");
+  assert.equal(recorded.task.collaborationProjectId, "bridge-team");
+  assert.equal(recorded.task.coordinatorEpoch, 2);
+  assert.deepEqual(recorded.task.acceptanceCriteria, ["Tests pass"]);
+}));

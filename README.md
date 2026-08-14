@@ -199,6 +199,7 @@ queue + 公开进度开启 + 最终回答 @提醒开启
 - [飞书应用、权限、事件、发布与 OAuth](docs/FEISHU_APP_SETUP.md)
 - [Codex 安装代理协议](docs/INSTALL_AGENT.md)
 - [Project Agent / 多人协作保留模式](docs/PROJECT_AGENT.md)
+- [Collaboration Project v1：Coordinator、审批、Agent 与 Git 协议](docs/COLLABORATION_PROJECT_V1.md)
 - Release Notes：[v0.1](docs/releases/v0.1.0-beta.1.md) · [v0.2](docs/releases/v0.2.0-beta.1.md) · [v0.3](docs/releases/v0.3.0-beta.1.md) · [v0.3.1](docs/releases/v0.3.1-beta.1.md)
 
 ## 开发与验证

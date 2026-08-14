@@ -129,3 +129,20 @@ test("publishes results and writes one git-common-dir Project registration", asy
   assert.equal(filePath, await collaborationRegistrationPath(context));
   assert.deepEqual(JSON.parse(await fs.readFile(filePath, "utf8")), registration);
 }));
+
+test("creates a new writable assignment branch from an exact protected-base commit", async () => fixture(async ({ repo, handoff }) => {
+  const baseCommit = await git(repo, ["rev-parse", "HEAD"]);
+  const prepared = await handoff.prepareAssignedWorktree({
+    baseGit: { remote: "origin", branch: "main", commit: baseCommit },
+    targetBranch: "task/T-001",
+  });
+  assert.equal(prepared.created, true);
+  assert.equal(prepared.branch, "task/T-001");
+  assert.equal(prepared.baseBranch, "main");
+  assert.equal(prepared.baseCommit, baseCommit);
+  assert.equal(await git(prepared.path, ["rev-parse", "HEAD"]), baseCommit);
+  await assert.rejects(() => handoff.prepareAssignedWorktree({
+    baseGit: { remote: "origin", branch: "main", commit: baseCommit },
+    targetBranch: "main",
+  }), /Protected default branch/);
+}));

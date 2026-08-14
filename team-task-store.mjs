@@ -16,6 +16,11 @@ function assertTaskFlow(task, event, peer) {
   if (task.requesterAgentId !== event.requesterAgentId || task.executorAgentId !== event.executorAgentId) {
     throw new Error("Task ownership cannot change across events");
   }
+  if (task.collaborationProjectId !== event.collaborationProjectId
+    || task.coordinatorAgentId !== event.coordinatorAgentId
+    || task.coordinatorEpoch !== event.coordinatorEpoch) {
+    throw new Error("Collaboration Project Coordinator authority cannot change across task events");
+  }
 }
 
 function applyExecutorEvent(task, event) {
@@ -50,15 +55,30 @@ function applyExecutorEvent(task, event) {
 }
 
 function migrateSaved(saved) {
-  if (saved?.schemaVersion === 2 && Array.isArray(saved.tasks) && Array.isArray(saved.seenEventIds)) return saved;
+  if (saved?.schemaVersion === 3 && Array.isArray(saved.tasks) && Array.isArray(saved.seenEventIds)) return saved;
+  if (saved?.schemaVersion === 2 && Array.isArray(saved.tasks) && Array.isArray(saved.seenEventIds)) {
+    return {
+      schemaVersion: 3,
+      tasks: saved.tasks.map((task) => ({
+        ...task,
+        collaborationProjectId: undefined,
+        coordinatorAgentId: undefined,
+        coordinatorEpoch: undefined,
+      })),
+      seenEventIds: saved.seenEventIds,
+    };
+  }
   if (saved?.schemaVersion === 1 && Array.isArray(saved.tasks) && Array.isArray(saved.seenEventIds)) {
     return {
-      schemaVersion: 2,
+      schemaVersion: 3,
       tasks: saved.tasks.map((task) => ({
         ...task,
         legacyProjectId: task.projectId,
         groupChatId: task.chatId,
         requestGit: task.branch ? { branch: task.branch } : undefined,
+        collaborationProjectId: undefined,
+        coordinatorAgentId: undefined,
+        coordinatorEpoch: undefined,
       })),
       seenEventIds: saved.seenEventIds,
     };
@@ -68,7 +88,7 @@ function migrateSaved(saved) {
 
 export class TeamTaskStore {
   static async open(filePath, { now = Date.now } = {}) {
-    let saved = { schemaVersion: 2, tasks: [], seenEventIds: [] };
+    let saved = { schemaVersion: 3, tasks: [], seenEventIds: [] };
     try { saved = migrateSaved(JSON.parse(await fs.readFile(filePath, "utf8"))); }
     catch (error) {
       if (error?.code !== "ENOENT") throw new Error(`Team task store is unreadable: ${error.message}`);
@@ -119,7 +139,14 @@ export class TeamTaskStore {
       receiveMode: event.payload.receiveMode,
       resultMode: event.payload.resultMode,
       requestGit: event.payload.git,
-      branch: event.payload.git.branch,
+      branch: event.payload.targetBranch || event.payload.git.branch,
+      acceptanceCriteria: event.payload.acceptanceCriteria,
+      evidenceRequired: event.payload.evidenceRequired,
+      reviewerAgentId: event.payload.reviewerAgentId,
+      parentTaskId: event.payload.parentTaskId,
+      collaborationProjectId: event.collaborationProjectId,
+      coordinatorAgentId: event.coordinatorAgentId,
+      coordinatorEpoch: event.coordinatorEpoch,
       requesterAgentId: event.requesterAgentId,
       executorAgentId: event.executorAgentId,
       peerAgentId: peer.agentId,
@@ -150,6 +177,10 @@ export class TeamTaskStore {
           && task.githubRepository === event.githubRepository
           && task.title === event.payload.title
           && task.prompt === event.payload.prompt
+          && task.branch === (event.payload.targetBranch || event.payload.git.branch)
+          && task.collaborationProjectId === event.collaborationProjectId
+          && task.coordinatorAgentId === event.coordinatorAgentId
+          && task.coordinatorEpoch === event.coordinatorEpoch
           && JSON.stringify(task.requestGit) === JSON.stringify(event.payload.git);
         if (!sameRequest) throw new Error(`Task ${event.taskId} was requested more than once with different content`);
         this.rememberEvent(event.eventId);
@@ -168,7 +199,14 @@ export class TeamTaskStore {
         receiveMode: event.payload.receiveMode,
         resultMode: event.payload.resultMode,
         requestGit: event.payload.git,
-        branch: event.payload.git.branch,
+        branch: event.payload.targetBranch || event.payload.git.branch,
+        acceptanceCriteria: event.payload.acceptanceCriteria,
+        evidenceRequired: event.payload.evidenceRequired,
+        reviewerAgentId: event.payload.reviewerAgentId,
+        parentTaskId: event.payload.parentTaskId,
+        collaborationProjectId: event.collaborationProjectId,
+        coordinatorAgentId: event.coordinatorAgentId,
+        coordinatorEpoch: event.coordinatorEpoch,
         requesterAgentId: event.requesterAgentId,
         executorAgentId: event.executorAgentId,
         peerAgentId: peer.agentId,
@@ -304,7 +342,7 @@ export class TeamTaskStore {
       .slice(0, MAX_TASKS);
     this.tasks = new Map(tasks.map((task) => [task.taskId, task]));
     const snapshot = JSON.stringify({
-      schemaVersion: 2,
+      schemaVersion: 3,
       tasks,
       seenEventIds: [...this.seenEventIds],
     }, null, 2);

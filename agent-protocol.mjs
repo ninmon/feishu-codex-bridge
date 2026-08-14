@@ -42,7 +42,16 @@ function boundedGit(value, field = "payload.git") {
   return { remote, branch, commit, ...(prUrl ? { prUrl } : {}) };
 }
 
-function boundedPayload(kind, payload) {
+function boundedStrings(values, field, { min = 0, max = 20, itemMax = 1_000 } = {}) {
+  if (!Array.isArray(values)) throw new TypeError(`${field} must be an array`);
+  const normalized = [...new Set(values.map((value, index) => requiredString(value, `${field}[${index}]`, itemMax)))];
+  if (normalized.length < min || normalized.length > max) {
+    throw new TypeError(`${field} must contain between ${min} and ${max} entries`);
+  }
+  return normalized;
+}
+
+function boundedPayload(kind, payload, { projectEvent = false } = {}) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw new TypeError("payload must be an object");
   }
@@ -51,12 +60,31 @@ function boundedPayload(kind, payload) {
     const resultMode = String(payload.resultMode || "notify").trim();
     if (!RECEIVE_MODES.has(receiveMode)) throw new TypeError("payload.receiveMode is invalid");
     if (!RESULT_MODES.has(resultMode)) throw new TypeError("payload.resultMode is invalid");
-    return {
+    const base = {
       title: requiredString(payload.title, "payload.title", 160),
       prompt: requiredString(payload.prompt, "payload.prompt", 12_000),
       receiveMode,
       resultMode,
       git: boundedGit(payload.git),
+    };
+    if (!projectEvent) return base;
+    const targetBranch = requiredString(payload.targetBranch, "payload.targetBranch", 200);
+    if (!BRANCH.test(targetBranch)) throw new TypeError("payload.targetBranch is invalid");
+    const reviewerAgentId = payload.reviewerAgentId
+      ? requiredString(payload.reviewerAgentId, "payload.reviewerAgentId", 63)
+      : undefined;
+    if (reviewerAgentId && !AGENT_ID.test(reviewerAgentId)) throw new TypeError("payload.reviewerAgentId is invalid");
+    const parentTaskId = payload.parentTaskId
+      ? requiredString(payload.parentTaskId, "payload.parentTaskId", 128)
+      : undefined;
+    if (parentTaskId && !TASK_ID.test(parentTaskId)) throw new TypeError("payload.parentTaskId is invalid");
+    return {
+      ...base,
+      targetBranch,
+      acceptanceCriteria: boundedStrings(payload.acceptanceCriteria, "payload.acceptanceCriteria", { min: 1, max: 20 }),
+      evidenceRequired: boundedStrings(payload.evidenceRequired || [], "payload.evidenceRequired", { max: 20 }),
+      ...(reviewerAgentId ? { reviewerAgentId } : {}),
+      ...(parentTaskId ? { parentTaskId } : {}),
     };
   }
   if (kind === "task.accepted") {
@@ -103,13 +131,24 @@ export function validateAgentEvent(event, {
   maxHops = 2,
 } = {}) {
   if (!event || typeof event !== "object" || Array.isArray(event)) throw new TypeError("Agent event must be an object");
-  if (event.schemaVersion !== 2) throw new TypeError("Unsupported agent event schemaVersion");
+  if (event.schemaVersion !== 2 && event.schemaVersion !== 3) throw new TypeError("Unsupported agent event schemaVersion");
+  const projectEvent = event.schemaVersion === 3;
   if (!EVENT_KINDS.has(event.kind)) throw new TypeError(`Unsupported agent event kind: ${event.kind}`);
   if (!EVENT_ID.test(String(event.eventId || ""))) throw new TypeError("Invalid eventId");
   if (!TASK_ID.test(String(event.taskId || ""))) throw new TypeError("Invalid taskId");
   if (!CHAT_ID.test(String(event.groupChatId || ""))) throw new TypeError("Invalid groupChatId");
   for (const field of ["fromAgentId", "toAgentId", "requesterAgentId", "executorAgentId"]) {
     if (!AGENT_ID.test(String(event[field] || ""))) throw new TypeError(`Invalid ${field}`);
+  }
+  if (projectEvent) {
+    if (!AGENT_ID.test(String(event.collaborationProjectId || ""))) throw new TypeError("Invalid collaborationProjectId");
+    if (!AGENT_ID.test(String(event.coordinatorAgentId || ""))) throw new TypeError("Invalid coordinatorAgentId");
+    if (!Number.isSafeInteger(event.coordinatorEpoch) || event.coordinatorEpoch < 1) {
+      throw new TypeError("Invalid coordinatorEpoch");
+    }
+    if (event.requesterAgentId !== event.coordinatorAgentId) {
+      throw new TypeError("Collaboration Project task requester must be the active Coordinator");
+    }
   }
   if (!Number.isInteger(event.createdAt) || !Number.isInteger(event.expiresAt)) {
     throw new TypeError("createdAt and expiresAt must be integer milliseconds");
@@ -123,7 +162,7 @@ export function validateAgentEvent(event, {
     throw new TypeError("Agent event hop exceeds the configured limit");
   }
   validateRoleFlow(event);
-  const payload = boundedPayload(event.kind, event.payload);
+  const payload = boundedPayload(event.kind, event.payload, { projectEvent });
   return Object.freeze({
     ...event,
     githubRepository: canonicalGitHubRepository(event.githubRepository),
@@ -148,6 +187,18 @@ export function validateIncomingAgentEvent(event, {
   if (validated.githubRepository !== config.collaboration.githubRepository) {
     throw new TypeError("Agent event repository does not match the bound GitHub repository");
   }
+  if (config.collaboration.projectId) {
+    if (validated.schemaVersion !== 3) throw new TypeError("Collaboration Project requires a project-scoped Agent event");
+    if (validated.collaborationProjectId !== config.collaboration.projectId) {
+      throw new TypeError("Agent event Collaboration Project does not match this binding");
+    }
+    if (validated.coordinatorAgentId !== config.collaboration.coordinatorAgentId
+      || validated.coordinatorEpoch !== config.collaboration.coordinatorEpoch) {
+      throw new TypeError("Agent event Coordinator authority is stale or does not match this Project");
+    }
+  } else if (validated.schemaVersion === 3) {
+    throw new TypeError("A project-scoped Agent event cannot enter a legacy collaboration binding");
+  }
   if (validated.fromAgentId !== peer.agentId) throw new TypeError("Agent event sender does not match the authenticated peer Bot");
   if (validated.toAgentId !== config.agent.id) throw new TypeError("Agent event is addressed to another Agent");
   return validated;
@@ -162,11 +213,17 @@ export function createAgentEvent({
   toAgentId,
   requesterAgentId,
   executorAgentId,
+  collaborationProjectId,
+  coordinatorAgentId,
+  coordinatorEpoch,
   payload = {},
   hop = 0,
 }, { now = Date.now(), ttlMs = 15 * 60_000 } = {}) {
+  const projectEvent = collaborationProjectId !== undefined
+    || coordinatorAgentId !== undefined
+    || coordinatorEpoch !== undefined;
   return validateAgentEvent({
-    schemaVersion: 2,
+    schemaVersion: projectEvent ? 3 : 2,
     eventId: `evt:${randomUUID()}`,
     taskId,
     kind,
@@ -176,6 +233,7 @@ export function createAgentEvent({
     toAgentId,
     requesterAgentId,
     executorAgentId,
+    ...(projectEvent ? { collaborationProjectId, coordinatorAgentId, coordinatorEpoch } : {}),
     createdAt: now,
     expiresAt: now + ttlMs,
     hop,

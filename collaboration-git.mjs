@@ -160,16 +160,48 @@ export class CollaborationGitHandoff {
 
   async prepareIncoming(git) {
     const spec = await this.fetchExact(git);
+    return this.prepareFetchedBranch(spec, spec.branch);
+  }
+
+  async prepareAssignedWorktree({ baseGit, targetBranch }) {
+    const spec = await this.fetchExact(baseGit);
+    const branch = requiredString(targetBranch, "targetBranch", 200);
+    try { await this.projectContext.git(["check-ref-format", "--branch", branch]); }
+    catch { throw new TypeError(`Invalid collaboration target branch: ${branch}`); }
+    if (this.projectContext.project.protectDefaultBranch
+      && branch === this.projectContext.project.defaultBranch) {
+      throw new Error(`Protected default branch ${branch} cannot be used for collaboration writes`);
+    }
+    if (branch === spec.branch) return this.prepareFetchedBranch(spec, branch);
+
+    let targetCommit = await this.remoteHead(branch);
+    if (targetCommit) {
+      await this.projectContext.git(["fetch", "--no-tags", this.remote, `refs/heads/${branch}`]);
+      const fetched = (await this.projectContext.git(["rev-parse", "FETCH_HEAD"])).trim().toLowerCase();
+      if (fetched !== targetCommit) throw new Error(`Remote ${this.remote}/${branch} changed during assignment preparation`);
+      if (!await this.isAncestor(spec.commit, targetCommit)) {
+        throw new Error(`Existing target branch ${branch} is not descended from the assigned base commit`);
+      }
+    } else {
+      targetCommit = spec.commit;
+    }
+    const prepared = await this.prepareFetchedBranch({ ...spec, branch, commit: targetCommit }, branch, {
+      allowMissingRemote: true,
+    });
+    return { ...prepared, baseBranch: spec.branch, baseCommit: spec.commit };
+  }
+
+  async prepareFetchedBranch(spec, branch, { allowMissingRemote = false } = {}) {
     let snapshot = await this.projectContext.refresh();
-    const existingWorktree = snapshot.worktrees.find(({ branch }) => branch === spec.branch);
+    const existingWorktree = snapshot.worktrees.find((candidate) => candidate.branch === branch);
     if (existingWorktree) {
       const current = await this.inspectWorktree(existingWorktree.path, {
-        expectedBranch: spec.branch,
+        expectedBranch: branch,
         requireWritable: true,
       });
       if (current.commit !== spec.commit) {
         if (!await this.isAncestor(current.commit, spec.commit)) {
-          throw new Error(`Local branch ${spec.branch} has diverged from the collaboration commit`);
+          throw new Error(`Local branch ${branch} has diverged from the collaboration commit`);
         }
         // Advance to the already verified FETCH_HEAD commit without a second
         // network lookup. --ff-only cannot create a merge commit or reconcile
@@ -179,32 +211,33 @@ export class CollaborationGitHandoff {
         ], { cwd: current.cwd });
       }
       const verified = await this.inspectWorktree(existingWorktree.path, {
-        expectedBranch: spec.branch,
+        expectedBranch: branch,
         expectedCommit: spec.commit,
       });
       return { ...verified.worktree, path: verified.worktree.path, created: false, commit: verified.commit };
     }
-    const excluded = snapshot.excludedWorktrees.find(({ branch }) => branch === spec.branch);
-    if (excluded) throw new Error(`Branch ${spec.branch} is checked out outside project.allowedWorktreeRoots`);
+    const excluded = snapshot.excludedWorktrees.find((candidate) => candidate.branch === branch);
+    if (excluded) throw new Error(`Branch ${branch} is checked out outside project.allowedWorktreeRoots`);
 
-    const local = snapshot.branches.find(({ kind, name }) => kind === "local" && name === spec.branch);
+    const local = snapshot.branches.find(({ kind, name }) => kind === "local" && name === branch);
     if (local && local.head.toLowerCase() !== spec.commit) {
       if (!await this.isAncestor(local.head, spec.commit)) {
-        throw new Error(`Local branch ${spec.branch} has diverged from the collaboration commit`);
+        throw new Error(`Local branch ${branch} has diverged from the collaboration commit`);
       }
       await this.projectContext.git([
-        "update-ref", `refs/heads/${spec.branch}`, spec.commit, local.head,
+        "update-ref", `refs/heads/${branch}`, spec.commit, local.head,
       ]);
     }
-    const worktree = await this.projectContext.prepareWorktree(spec.branch, {
+    if (!local && !allowMissingRemote) await this.assertRemoteCommit(branch, spec.commit);
+    const worktree = await this.projectContext.prepareWorktree(branch, {
       startPoint: local ? undefined : spec.commit,
     });
     const verified = await this.inspectWorktree(worktree.path, {
-      expectedBranch: spec.branch,
+      expectedBranch: branch,
       expectedCommit: spec.commit,
     });
     snapshot = await this.projectContext.refresh();
-    const registered = snapshot.worktrees.find(({ branch }) => branch === spec.branch);
+    const registered = snapshot.worktrees.find((candidate) => candidate.branch === branch);
     return { ...registered, created: worktree.created, commit: verified.commit };
   }
 
