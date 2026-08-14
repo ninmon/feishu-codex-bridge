@@ -1,0 +1,111 @@
+{
+  "schemaVersion": 4,
+  "mode": "project-agent",
+  "appId": "cli_pm_collaboration_bot_app_id",
+  "workspace": "C:\\path\\to\\pm-collaboration-runtime",
+  "agent": {
+    "id": "peiyuan-collab",
+    "displayName": "Peiyuan Collaboration Bot",
+    "ownerOpenId": "ou_pm_human_open_id",
+    "ownerDisplayName": "Peiyuan",
+    "botOpenId": "ou_pm_collaboration_bot_open_id",
+    "allowedHumanOpenIds": [
+      "ou_pm_human_open_id"
+    ],
+    "roles": [
+      "reviewer",
+      "repository-owner"
+    ],
+    "capabilities": [
+      "windows",
+      "node"
+    ],
+    "executor": {
+      "type": "codex"
+    }
+  },
+  "project": {
+    "id": "bridge-local",
+    "name": "Feishu Codex Bridge",
+    "repoRoot": "C:\\path\\to\\feishu-codex-bridge",
+    "worktreeRoot": "C:\\path\\to\\worktrees\\feishu-codex-bridge",
+    "allowedWorktreeRoots": [
+      "C:\\path\\to\\feishu-codex-bridge",
+      "C:\\path\\to\\worktrees\\feishu-codex-bridge"
+    ],
+    "defaultBranch": "main",
+    "protectDefaultBranch": true,
+    "allowedRemotes": [
+      "origin"
+    ]
+  },
+  "collaboration": {
+    "enabled": true,
+    "projectId": "feishu-codex-bridge-team",
+    "projectName": "Feishu Codex Bridge",
+    "groupChatId": "oc_shared_collaboration_group",
+    "controlGroupChatId": "oc_pm_private_control_group",
+    "githubRepository": "owner/feishu-codex-bridge",
+    "remote": "origin",
+    "coordinatorAgentId": "peiyuan-collab",
+    "coordinatorEpoch": 1,
+    "backupCoordinatorAgentIds": [
+      "alice-collab"
+    ],
+    "groupHumanMessageMode": "mention",
+    "receiveMode": "recommend",
+    "approverOpenIds": [
+      "ou_pm_human_open_id"
+    ],
+    "approvalPolicy": {
+      "plan": "pm",
+      "assignment": "pm",
+      "landing": "participant",
+      "technicalReview": "independent-reviewer",
+      "publish": "pm",
+      "pmOwnWork": "independent-reviewer"
+    },
+    "documents": {
+      "enabled": false,
+      "folderToken": "fldcn_pre_shared_project_folder",
+      "identity": "user",
+      "profile": "default"
+    },
+    "trustedPeers": [
+      {
+        "agentId": "alice-collab",
+        "displayName": "Alice Collaboration Bot",
+        "humanOpenId": "ou_alice_human_open_id",
+        "humanDisplayName": "Alice",
+        "botOpenId": "ou_alice_collaboration_bot_open_id",
+        "roles": [
+          "reviewer"
+        ],
+        "capabilities": [
+          "node"
+        ]
+      }
+    ]
+  },
+  "teamHub": {
+    "enabled": false,
+    "path": "C:\\path\\to\\shared-team-hub",
+    "writerOpenIds": [
+      "ou_pm_human_open_id"
+    ],
+    "repositoryIds": [
+      "bridge-local"
+    ]
+  },
+  "nodeExecutable": "C:\\Program Files\\nodejs\\node.exe",
+  "larkCliEntry": ".\\node_modules\\@larksuite\\cli\\scripts\\run.js",
+  "codexExecutable": "C:\\path\\to\\codex.exe",
+  "sandboxMode": "workspace-write",
+  "completionPollMs": 30000,
+  "completionStableMs": 15000,
+  "httpTimeoutMs": 20000,
+  "handshakeTimeoutMs": 20000,
+  "deliveryRetryMs": 60000,
+  "maxInputChars": 12000,
+  "maxReplyChars": 10000
+}

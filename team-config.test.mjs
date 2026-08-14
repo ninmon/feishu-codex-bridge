@@ -28,7 +28,7 @@ function collaboration(overrides = {}) {
 
 test("normalizes legacy single-user config without enabling group access", () => {
   const config = normalizeBridgeConfig(legacy, { configDir: "C:/config" });
-  assert.equal(config.schemaVersion, 3);
+  assert.equal(config.schemaVersion, 4);
   assert.equal(config.agent.id, "local-codex");
   assert.deepEqual(config.agent.allowedHumanOpenIds, ["ou_owner"]);
   assert.equal(config.agent.executor.type, "codex");
@@ -79,6 +79,88 @@ test("normalizes a one-group, one-Project, one-GitHub-repository team config", (
   assert.equal(config.project.desktopProjectId, "desktop-project-1");
   assert.equal(config.project.worktreeRoot, path.resolve("C:/config", "../worktrees/bridge"));
   assert.equal(config.teamHub.path, path.resolve("C:/config", "../team-agent-hub"));
+});
+
+test("normalizes a Collaboration Project with one active Coordinator and a private control group", () => {
+  const config = normalizeBridgeConfig({
+    ...legacy,
+    agent: {
+      id: "peiyuan-collab",
+      ownerOpenId: "ou_owner",
+      ownerDisplayName: "Peiyuan",
+      botOpenId: "ou_localbot",
+      roles: ["reviewer"],
+      capabilities: ["node", "windows"],
+    },
+    nodeExecutable: "C:/Program Files/nodejs/node.exe",
+    larkCliEntry: "./node_modules/@larksuite/cli/scripts/run.js",
+    collaboration: collaboration({
+      projectId: "bridge-team",
+      projectName: "Feishu Codex Bridge",
+      controlGroupChatId: "oc_personal_control",
+      coordinatorAgentId: "peiyuan-collab",
+      coordinatorEpoch: 3,
+      coordinatorThreadId: "019ff5a0-559b-79d3-8bd3-2eb2d5f0c294",
+      backupCoordinatorAgentIds: ["alice-codex"],
+      documents: {
+        enabled: true,
+        folderToken: "fldcn_shared_project_folder",
+        identity: "user",
+        profile: "default",
+      },
+    }),
+  }, { configDir: "C:/config" });
+
+  assert.equal(config.collaboration.projectId, "bridge-team");
+  assert.equal(config.collaboration.localRole, "coordinator");
+  assert.equal(config.collaboration.pmHumanOpenId, "ou_owner");
+  assert.equal(config.collaboration.coordinatorEpoch, 3);
+  assert.equal(config.collaboration.groupHumanMessageMode, "mention");
+  assert.deepEqual(sdkGroupAllowlist(config), ["oc_team", "oc_personal_control"]);
+  assert.deepEqual(config.collaboration.participants[0].roles, ["member", "reviewer", "pm"]);
+  assert.deepEqual(config.collaboration.participants[0].capabilities, ["node", "windows"]);
+  assert.equal(config.collaboration.approvalPolicy.pmOwnWork, "independent-reviewer");
+  assert.equal(config.collaboration.documents.folderToken, "fldcn_shared_project_folder");
+});
+
+test("requires complete and unambiguous Collaboration Project authority", () => {
+  const base = {
+    ...legacy,
+    agent: { id: "local", ownerOpenId: "ou_owner", botOpenId: "ou_bot" },
+  };
+  assert.throws(() => normalizeBridgeConfig({
+    ...base,
+    collaboration: collaboration({ projectId: "team", coordinatorAgentId: "local" }),
+  }), /controlGroupChatId/);
+  assert.throws(() => normalizeBridgeConfig({
+    ...base,
+    collaboration: collaboration({
+      projectId: "team",
+      controlGroupChatId: "oc_control",
+      coordinatorAgentId: "unknown",
+    }),
+  }), /local Agent or a trusted peer/);
+  assert.throws(() => normalizeBridgeConfig({
+    ...base,
+    collaboration: collaboration({
+      projectId: "team",
+      controlGroupChatId: "oc_team",
+      coordinatorAgentId: "local",
+    }),
+  }), /must differ/);
+  assert.throws(() => normalizeBridgeConfig({
+    ...base,
+    collaboration: collaboration({
+      projectId: "team",
+      controlGroupChatId: "oc_control",
+      coordinatorAgentId: "alice-codex",
+      coordinatorThreadId: "remote-thread-must-stay-private",
+    }),
+  }), /remote Coordinator threadId/);
+  assert.throws(() => normalizeBridgeConfig({
+    ...base,
+    collaboration: collaboration({ documents: { enabled: true, folderToken: "fldcn_folder" } }),
+  }), /require collaboration.projectId/);
 });
 
 test("requires exactly one collaboration group and one GitHub repository", () => {

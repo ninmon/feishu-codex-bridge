@@ -27,6 +27,30 @@ const request = () => createAgentEvent({
   },
 }, { now, ttlMs: 60_000 });
 
+const projectRequest = () => createAgentEvent({
+  kind: "task.request",
+  groupChatId: "oc_team",
+  githubRepository: "Example/Bridge",
+  fromAgentId: "pm-collab",
+  toAgentId: "local-codex",
+  requesterAgentId: "pm-collab",
+  executorAgentId: "local-codex",
+  collaborationProjectId: "bridge-team",
+  coordinatorAgentId: "pm-collab",
+  coordinatorEpoch: 4,
+  payload: {
+    title: "Fix routing",
+    prompt: "Implement and test the routing fix.",
+    receiveMode: "recommend",
+    resultMode: "notify",
+    git: { remote: "origin", branch: "main", commit: "b".repeat(40) },
+    targetBranch: "task/T-001",
+    acceptanceCriteria: ["Routing tests pass"],
+    evidenceRequired: ["node --test"],
+    reviewerAgentId: "reviewer-codex",
+  },
+}, { now, ttlMs: 60_000 });
+
 test("round-trips a repository-bound Agent task event", () => {
   const event = request();
   assert.deepEqual(decodeAgentEvent(encodeAgentEvent(event)), event);
@@ -110,4 +134,45 @@ test("enforces direction for executor updates and requester approval", () => {
     payload: { note: "reviewed" },
   }, { now, ttlMs: 60_000 });
   assert.equal(approved.kind, "task.approved");
+});
+
+test("binds a project-scoped task to the active Coordinator epoch and target branch", () => {
+  const event = projectRequest();
+  assert.equal(event.schemaVersion, 3);
+  assert.equal(event.payload.git.branch, "main");
+  assert.equal(event.payload.targetBranch, "task/T-001");
+  const config = {
+    agent: { id: "local-codex" },
+    collaboration: {
+      projectId: "bridge-team",
+      coordinatorAgentId: "pm-collab",
+      coordinatorEpoch: 4,
+      groupChatId: "oc_team",
+      githubRepository: "example/bridge",
+      eventTtlMs: 60_000,
+      maxHops: 2,
+    },
+  };
+  assert.equal(validateIncomingAgentEvent(event, {
+    config,
+    peer: { agentId: "pm-collab" },
+    chatId: "oc_team",
+    now,
+  }).collaborationProjectId, "bridge-team");
+  assert.throws(() => validateIncomingAgentEvent({ ...event, coordinatorEpoch: 3 }, {
+    config,
+    peer: { agentId: "pm-collab" },
+    chatId: "oc_team",
+    now,
+  }), /stale/);
+  assert.throws(() => validateIncomingAgentEvent(request(), {
+    config,
+    peer: { agentId: "alice-codex" },
+    chatId: "oc_team",
+    now,
+  }), /project-scoped/);
+  assert.throws(() => createAgentEvent({
+    ...projectRequest(),
+    coordinatorAgentId: "other-agent",
+  }, { now, ttlMs: 60_000 }), /requester must be the active Coordinator/);
 });

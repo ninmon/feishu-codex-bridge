@@ -4,7 +4,10 @@ export function classifyInboundMessage(msg, config, localBotOpenId = config.agen
 
   if (msg.chatType === "p2p") {
     if (senderIsBot) return { kind: "ignore", reason: "bot_dm" };
-    if (!config.agent.allowedHumanOpenIds.includes(msg.senderId)) {
+    const allowedDmHumans = config.collaboration.projectId
+      ? [config.agent.ownerOpenId]
+      : config.agent.allowedHumanOpenIds;
+    if (!allowedDmHumans.includes(msg.senderId)) {
       return { kind: "ignore", reason: "untrusted_human" };
     }
     return { kind: "human", scope: "dm" };
@@ -14,10 +17,22 @@ export function classifyInboundMessage(msg, config, localBotOpenId = config.agen
     return { kind: "ignore", reason: "unsupported_chat" };
   }
   if (!config.collaboration.enabled) return { kind: "ignore", reason: "collaboration_disabled" };
-  if (config.collaboration.groupChatId !== msg.chatId) {
+  const isSharedGroup = config.collaboration.groupChatId === msg.chatId;
+  const isControlGroup = config.collaboration.controlGroupChatId === msg.chatId;
+  if (!isSharedGroup && !isControlGroup) {
     return { kind: "ignore", reason: "untrusted_group" };
   }
   if (msg.mentionAll) return { kind: "ignore", reason: "mention_all" };
+
+  if (isControlGroup) {
+    if (senderIsBot) return { kind: "ignore", reason: "bot_control_group" };
+    if (msg.senderId !== config.agent.ownerOpenId) return { kind: "ignore", reason: "untrusted_human" };
+    return {
+      kind: "human",
+      scope: "control",
+      addressedBy: msg.mentionedBot ? "mention" : "owner-message",
+    };
+  }
 
   if (senderIsBot) {
     if (!msg.mentionedBot) return { kind: "ignore", reason: "not_mentioned" };
@@ -28,15 +43,18 @@ export function classifyInboundMessage(msg, config, localBotOpenId = config.agen
       (candidate) => candidate.enabled && candidate.botOpenId === msg.senderId,
     );
     if (!peer) return { kind: "ignore", reason: "untrusted_peer" };
-    return { kind: "peer", scope: "group", peer };
+    return { kind: "peer", scope: "shared", peer };
   }
 
-  if (!config.agent.allowedHumanOpenIds.includes(msg.senderId)) {
+  const sharedHumanOpenIds = config.collaboration.participants
+    ? config.collaboration.participants.filter(({ enabled }) => enabled !== false).map(({ humanOpenId }) => humanOpenId)
+    : config.agent.allowedHumanOpenIds;
+  if (!sharedHumanOpenIds.includes(msg.senderId)) {
     return { kind: "ignore", reason: "untrusted_human" };
   }
-  if (msg.mentionedBot) return { kind: "human", scope: "group", addressedBy: "mention" };
+  if (msg.mentionedBot) return { kind: "human", scope: "shared", addressedBy: "mention" };
   if (config.collaboration.groupHumanMessageMode === "owner" && msg.senderId === config.agent.ownerOpenId) {
-    return { kind: "human", scope: "group", addressedBy: "owner-message" };
+    return { kind: "human", scope: "shared", addressedBy: "owner-message" };
   }
   return { kind: "ignore", reason: "not_mentioned" };
 }

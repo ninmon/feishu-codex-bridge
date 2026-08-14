@@ -5,6 +5,7 @@ import { canonicalGitHubRepository } from "./collaboration-request-inbox.mjs";
 const AGENT_ID = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const OPEN_ID = /^ou_[A-Za-z0-9_-]+$/;
 const CHAT_ID = /^oc_[A-Za-z0-9_-]+$/;
+const PARTICIPANT_ROLES = new Set(["member", "reviewer", "repository-owner"]);
 
 function uniqueStrings(values = []) {
   return [...new Set(values.filter((value) => typeof value === "string").map((value) => value.trim()).filter(Boolean))];
@@ -90,8 +91,41 @@ function normalizePeer(peer) {
     humanOpenId,
     displayName: String(peer.displayName || agentId).trim(),
     humanDisplayName: String(peer.humanDisplayName || peer.displayName || agentId).trim(),
+    roles: normalizeParticipantRoles(peer.roles),
+    capabilities: uniqueStrings(peer.capabilities || []),
     enabled: peer.enabled !== false,
   };
+}
+
+function normalizeParticipantRoles(values = []) {
+  const roles = uniqueStrings(["member", ...(values || [])]);
+  for (const role of roles) {
+    if (!PARTICIPANT_ROLES.has(role)) throw new TypeError(`Unsupported collaboration participant role: ${role}`);
+  }
+  return roles;
+}
+
+function normalizeApprovalPolicy(raw = {}) {
+  const policy = {
+    plan: String(raw.plan || "pm").trim(),
+    assignment: String(raw.assignment || "pm").trim(),
+    landing: String(raw.landing || "participant").trim(),
+    technicalReview: String(raw.technicalReview || "independent-reviewer").trim(),
+    publish: String(raw.publish || "pm").trim(),
+    pmOwnWork: String(raw.pmOwnWork || "independent-reviewer").trim(),
+  };
+  const allowed = {
+    plan: new Set(["pm"]),
+    assignment: new Set(["pm", "pm-or-owner"]),
+    landing: new Set(["participant"]),
+    technicalReview: new Set(["independent-reviewer", "repository-owner"]),
+    publish: new Set(["pm"]),
+    pmOwnWork: new Set(["independent-reviewer"]),
+  };
+  for (const [field, value] of Object.entries(policy)) {
+    if (!allowed[field].has(value)) throw new TypeError(`collaboration.approvalPolicy.${field} is invalid`);
+  }
+  return policy;
 }
 
 export function normalizeBridgeConfig(raw, { configDir = process.cwd() } = {}) {
@@ -178,6 +212,88 @@ export function normalizeBridgeConfig(raw, { configDir = process.cwd() } = {}) {
   if (collaborationEnabled && !githubRepository) {
     throw new TypeError("collaboration.githubRepository is required when collaboration is enabled");
   }
+  const collaborationProjectId = raw.collaboration?.projectId === undefined
+    ? undefined
+    : requiredString(raw.collaboration.projectId, "collaboration.projectId");
+  if (collaborationProjectId && !AGENT_ID.test(collaborationProjectId)) {
+    throw new TypeError(`Invalid collaboration project id: ${collaborationProjectId}`);
+  }
+  const controlGroupChatId = raw.collaboration?.controlGroupChatId === undefined
+    ? undefined
+    : requiredString(raw.collaboration.controlGroupChatId, "collaboration.controlGroupChatId");
+  if (controlGroupChatId && !CHAT_ID.test(controlGroupChatId)) {
+    throw new TypeError(`Invalid collaboration control group chat_id: ${controlGroupChatId}`);
+  }
+  if (controlGroupChatId && controlGroupChatId === groupChatId) {
+    throw new TypeError("collaboration.controlGroupChatId must differ from the shared groupChatId");
+  }
+  const coordinatorAgentId = raw.collaboration?.coordinatorAgentId === undefined
+    ? undefined
+    : requiredString(raw.collaboration.coordinatorAgentId, "collaboration.coordinatorAgentId");
+  if (coordinatorAgentId && !AGENT_ID.test(coordinatorAgentId)) {
+    throw new TypeError(`Invalid collaboration coordinator agent id: ${coordinatorAgentId}`);
+  }
+  if (collaborationProjectId && !controlGroupChatId) {
+    throw new TypeError("collaboration.controlGroupChatId is required for a Collaboration Project");
+  }
+  if (collaborationProjectId && !coordinatorAgentId) {
+    throw new TypeError("collaboration.coordinatorAgentId is required for a Collaboration Project");
+  }
+  if (!collaborationProjectId && (controlGroupChatId || coordinatorAgentId || raw.collaboration?.coordinatorThreadId)) {
+    throw new TypeError("collaboration.projectId is required when configuring a control group or Coordinator");
+  }
+  const knownAgentIds = new Set([agentId, ...trustedPeers.map((peer) => peer.agentId)]);
+  if (coordinatorAgentId && !knownAgentIds.has(coordinatorAgentId)) {
+    throw new TypeError("collaboration.coordinatorAgentId must identify the local Agent or a trusted peer");
+  }
+  const coordinatorEpoch = Math.trunc(positiveNumber(raw.collaboration?.coordinatorEpoch, 1, {
+    min: 1,
+    max: Number.MAX_SAFE_INTEGER,
+  }));
+  const coordinatorThreadId = raw.collaboration?.coordinatorThreadId === undefined
+    ? undefined
+    : requiredString(raw.collaboration.coordinatorThreadId, "collaboration.coordinatorThreadId");
+  if (coordinatorThreadId && coordinatorThreadId.length > 160) {
+    throw new TypeError("collaboration.coordinatorThreadId is too long");
+  }
+  if (coordinatorThreadId && coordinatorAgentId !== agentId) {
+    throw new TypeError("A remote Coordinator threadId must never be copied into local configuration");
+  }
+  const backupCoordinatorAgentIds = uniqueStrings(raw.collaboration?.backupCoordinatorAgentIds || []);
+  for (const backupAgentId of backupCoordinatorAgentIds) {
+    if (!knownAgentIds.has(backupAgentId)) {
+      throw new TypeError("collaboration.backupCoordinatorAgentIds must contain only registered Agents");
+    }
+    if (backupAgentId === coordinatorAgentId) {
+      throw new TypeError("The active Coordinator cannot also be a backup Coordinator");
+    }
+  }
+  const coordinatorPeer = trustedPeers.find((peer) => peer.agentId === coordinatorAgentId);
+  const pmHumanOpenId = coordinatorAgentId
+    ? (coordinatorAgentId === agentId ? ownerOpenId : coordinatorPeer?.humanOpenId)
+    : undefined;
+  const approvalPolicy = normalizeApprovalPolicy(raw.collaboration?.approvalPolicy);
+  const projectDocumentsEnabled = raw.collaboration?.documents?.enabled === true;
+  const projectDocumentsFolderToken = raw.collaboration?.documents?.folderToken === undefined
+    ? undefined
+    : requiredString(raw.collaboration.documents.folderToken, "collaboration.documents.folderToken");
+  const projectDocumentsIdentity = String(raw.collaboration?.documents?.identity || "user").trim();
+  if (!new Set(["user", "bot"]).has(projectDocumentsIdentity)) {
+    throw new TypeError("collaboration.documents.identity must be user or bot");
+  }
+  if (projectDocumentsEnabled && !collaborationProjectId) {
+    throw new TypeError("Collaboration Project documents require collaboration.projectId");
+  }
+  if (projectDocumentsEnabled && !projectDocumentsFolderToken) {
+    throw new TypeError("collaboration.documents.folderToken is required when Project documents are enabled");
+  }
+  if (projectDocumentsEnabled) {
+    requiredString(raw.nodeExecutable, "nodeExecutable");
+    requiredString(raw.larkCliEntry, "larkCliEntry");
+  }
+  const projectDocumentsProfile = raw.collaboration?.documents?.profile === undefined
+    ? undefined
+    : requiredString(raw.collaboration.documents.profile, "collaboration.documents.profile");
   const collaborationRemote = String(raw.collaboration?.remote || project.allowedRemotes[0] || "origin").trim();
   if (!project.allowedRemotes.includes(collaborationRemote)) {
     throw new TypeError("collaboration.remote must be listed in project.allowedRemotes");
@@ -188,9 +304,12 @@ export function normalizeBridgeConfig(raw, { configDir = process.cwd() } = {}) {
   if (!new Set(["manual", "recommend", "auto"]).has(receiveMode)) {
     throw new TypeError("collaboration.receiveMode must be manual, recommend, or auto");
   }
-  const groupHumanMessageMode = String(raw.collaboration?.groupHumanMessageMode || "owner").trim();
+  const groupHumanMessageMode = String(raw.collaboration?.groupHumanMessageMode || (collaborationProjectId ? "mention" : "owner")).trim();
   if (!new Set(["mention", "owner"]).has(groupHumanMessageMode)) {
     throw new TypeError("collaboration.groupHumanMessageMode must be mention or owner");
+  }
+  if (collaborationProjectId && groupHumanMessageMode !== "mention") {
+    throw new TypeError("A Collaboration Project shared group must use groupHumanMessageMode=mention");
   }
 
   const teamHubEnabled = raw.teamHub?.enabled === true;
@@ -210,7 +329,7 @@ export function normalizeBridgeConfig(raw, { configDir = process.cwd() } = {}) {
 
   return {
     ...raw,
-    schemaVersion: 3,
+    schemaVersion: 4,
     appId: requiredString(raw.appId, "appId"),
     threadId: raw.threadId ? requiredString(raw.threadId, "threadId") : undefined,
     workspace,
@@ -221,6 +340,8 @@ export function normalizeBridgeConfig(raw, { configDir = process.cwd() } = {}) {
       ownerOpenId,
       botOpenId,
       allowedHumanOpenIds,
+      roles: normalizeParticipantRoles(raw.agent?.roles),
+      capabilities: uniqueStrings(raw.agent?.capabilities || []),
       executor: {
         type: String(raw.agent?.executor?.type || "codex").trim().toLowerCase(),
       },
@@ -231,11 +352,50 @@ export function normalizeBridgeConfig(raw, { configDir = process.cwd() } = {}) {
       groupChatId,
       groupChatIds: groupChatId ? [groupChatId] : [],
       defaultGroupChatId: groupChatId,
+      controlGroupChatId,
+      projectId: collaborationProjectId,
+      projectName: collaborationProjectId
+        ? String(raw.collaboration?.projectName || collaborationProjectId).trim()
+        : undefined,
       githubRepository,
       remote: collaborationRemote,
       receiveMode,
       groupHumanMessageMode,
       trustedPeers,
+      participants: [
+        {
+          agentId,
+          botOpenId,
+          humanOpenId: ownerOpenId,
+          displayName: String(raw.agent?.displayName || `${agentId} Codex`).trim(),
+          humanDisplayName: String(raw.agent?.ownerDisplayName || ownerOpenId).trim(),
+          roles: [
+            ...normalizeParticipantRoles(raw.agent?.roles),
+            ...(coordinatorAgentId === agentId ? ["pm"] : []),
+          ],
+          capabilities: uniqueStrings(raw.agent?.capabilities || []),
+          local: true,
+          enabled: true,
+        },
+        ...trustedPeers.map((peer) => ({
+          ...peer,
+          roles: [...peer.roles, ...(coordinatorAgentId === peer.agentId ? ["pm"] : [])],
+          local: false,
+        })),
+      ],
+      coordinatorAgentId,
+      coordinatorEpoch,
+      coordinatorThreadId,
+      pmHumanOpenId,
+      backupCoordinatorAgentIds,
+      localRole: coordinatorAgentId === agentId ? "coordinator" : "member",
+      approvalPolicy,
+      documents: {
+        enabled: projectDocumentsEnabled,
+        folderToken: projectDocumentsFolderToken,
+        identity: projectDocumentsIdentity,
+        profile: projectDocumentsProfile,
+      },
       approverOpenIds,
       autoAcceptPeerTasks: receiveMode === "auto",
       maxHops: positiveNumber(raw.collaboration?.maxHops, 2, { min: 1, max: 8 }),
@@ -269,6 +429,6 @@ export async function loadBridgeConfig(filePath) {
 
 export function sdkGroupAllowlist(config) {
   return config.collaboration.enabled
-    ? [config.collaboration.groupChatId]
+    ? uniqueStrings([config.collaboration.groupChatId, config.collaboration.controlGroupChatId])
     : ["oc_collaboration_disabled"];
 }

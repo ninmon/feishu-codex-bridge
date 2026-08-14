@@ -96,3 +96,50 @@ test("peer bots must be trusted and explicitly mention the local Bot", () => {
   assert.equal(classifyInboundMessage({ ...peerMessage, senderId: "ou_localbot" }, config).reason, "self_message");
   assert.equal(classifyInboundMessage({ ...peerMessage, senderId: "ou_unknown" }, config).reason, "untrusted_peer");
 });
+
+test("separates a Collaboration Project shared group from the owner's private control group", () => {
+  const projectConfig = {
+    ...config,
+    collaboration: {
+      ...config.collaboration,
+      projectId: "bridge-team",
+      controlGroupChatId: "oc_control",
+      groupHumanMessageMode: "mention",
+      participants: [
+        { agentId: "local", humanOpenId: "ou_owner", enabled: true },
+        { agentId: "alice", humanOpenId: "ou_alice", enabled: true },
+      ],
+    },
+  };
+  const ownerControl = classifyInboundMessage({
+    ...base,
+    chatType: "group",
+    chatId: "oc_control",
+    mentionedBot: false,
+  }, projectConfig);
+  assert.equal(ownerControl.kind, "human");
+  assert.equal(ownerControl.scope, "control");
+
+  assert.equal(classifyInboundMessage({
+    ...base,
+    chatType: "group",
+    chatId: "oc_control",
+    senderId: "ou_alice",
+    mentionedBot: true,
+  }, projectConfig).reason, "untrusted_human");
+
+  assert.equal(classifyInboundMessage({
+    ...base,
+    chatType: "group",
+    chatId: "oc_team",
+    senderId: "ou_alice",
+    mentionedBot: true,
+  }, projectConfig).scope, "shared");
+  assert.equal(classifyInboundMessage({
+    ...base,
+    chatType: "group",
+    chatId: "oc_team",
+    senderId: "ou_alice",
+    mentionedBot: false,
+  }, projectConfig).reason, "not_mentioned");
+});
