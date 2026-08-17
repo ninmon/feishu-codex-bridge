@@ -1,36 +1,30 @@
-import { promises as fs } from "node:fs";
+import { createSerializedFileWriter, readJsonArrayFile } from "../persistence/serialized-json-file.mjs";
 import { buildNativeAttachmentDeliveries } from "./feishu-native-attachment.mjs";
 
 const MAX_STORED_PROGRESS = 12;
 
-export function buildSessionStreamCardFollowups(baseRecord, attachments, mentionOpenId) {
-  const records = [];
+function buildCompletionNotice(baseRecord, mentionOpenId) {
   const userId = String(mentionOpenId || "").trim();
-  let dependency;
-  if (userId) {
-    dependency = `${baseRecord.deliveryId}:mention`;
-    records.push(Object.freeze({
-      kind: baseRecord.kind,
-      deliveryId: dependency,
-      messageId: baseRecord.messageId,
-      chatId: baseRecord.chatId,
-      threadId: baseRecord.threadId,
-      post: Object.freeze({
-        zh_cn: Object.freeze({
-          content: Object.freeze([Object.freeze([
-            Object.freeze({ tag: "at", user_id: userId }),
-            Object.freeze({ tag: "text", text: " 最终回答已完成" }),
-          ])]),
-        }),
-      }),
-      createdAt: Date.now(),
-    }));
-  }
-  records.push(...buildNativeAttachmentDeliveries(baseRecord, attachments).map((record) => Object.freeze({
-    ...record,
-    dependsOn: dependency,
-  })));
-  return Object.freeze(records);
+  if (!userId) return undefined;
+  return Object.freeze({
+    ...baseRecord,
+    post: {
+      zh_cn: {
+        content: [[
+          { tag: "at", user_id: userId },
+          { tag: "text", text: " 已完成" },
+        ]],
+      },
+    },
+  });
+}
+
+export function buildSessionStreamCardFollowups(baseRecord, attachments, { mentionOpenId } = {}) {
+  const completionNotice = buildCompletionNotice(baseRecord, mentionOpenId);
+  return Object.freeze([
+    ...(completionNotice ? [completionNotice] : []),
+    ...buildNativeAttachmentDeliveries(baseRecord, attachments),
+  ]);
 }
 
 function recordKey(threadId, turnId) {
@@ -124,6 +118,7 @@ function finalElements({ answer, answerSegments, maxAnswerChars }) {
 
 export function buildSessionStreamCard({
   progress = [],
+  queued,
   startedAtMs,
   nowMs = Date.now(),
   answer,
@@ -150,6 +145,34 @@ export function buildSessionStreamCard({
       content: `*回答时间：${formatTimestamp(completedAtMs, timeZone)} · 用时：${formatDuration(durationMs)} · 本轮 Token：${tokenText}*`,
     });
     summarySource = answer || answerSegments?.find((segment) => segment?.type === "text")?.text || "Codex 回复完成";
+  } else if (queued) {
+    const position = Math.max(1, Number(queued.position) || 1);
+    const cancelled = queued.status === "cancelled";
+    const blocked = queued.status === "blocked";
+    elements = [{
+      tag: "markdown",
+      content: cancelled
+        ? `**已从下一轮队列移除**\n\n${String(queued.reason || "这条 Prompt 不会再自动开始。")}`
+        : blocked
+          ? [
+              "**Session 写入权限冲突**",
+              "",
+              String(queued.reason || "当前 Session 暂时无法由 Bridge 写入。"),
+              "",
+              "*这条 Prompt 仍保留在队列中；写入权限释放后，Bridge 会自动重试。*",
+            ].join("\n")
+        : [
+            `**${queued.alreadyQueued ? "已在下一轮队列中" : "已按默认设置加入下一轮队列"}**`,
+            "",
+            `- 当前排位：**${position}**`,
+            "- 执行方式：任务空闲后作为独立的新 Turn 开始",
+            "",
+            "*如需改为调整方向，请先使用 `/settings input steer`。*",
+          ].join("\n"),
+    }];
+    summarySource = cancelled
+      ? "已从下一轮队列移除"
+      : blocked ? "Session 写入权限冲突 · 等待自动重试" : `排队中 · 当前排位 ${position}`;
   } else {
     const elapsedMs = Number.isFinite(Number(startedAtMs))
       ? Math.max(0, Number(nowMs) - Number(startedAtMs))
@@ -216,23 +239,15 @@ function normalizeRecord(record) {
 
 export class SessionStreamCardStore {
   constructor(filePath, records = []) {
-    this.filePath = filePath;
     this.records = new Map(records.map((record) => {
       const normalized = normalizeRecord(record);
       return [recordKey(normalized.threadId, normalized.turnId), normalized];
     }));
-    this.writeTail = Promise.resolve();
+    this.writeSnapshot = createSerializedFileWriter(filePath);
   }
 
   static async open(filePath) {
-    let records = [];
-    try {
-      const value = JSON.parse(await fs.readFile(filePath, "utf8"));
-      if (!Array.isArray(value)) throw new TypeError("Stream card store must contain an array");
-      records = value;
-    } catch (error) {
-      if (error?.code !== "ENOENT") throw error;
-    }
+    const records = await readJsonArrayFile(filePath, "Stream card store");
     return new SessionStreamCardStore(filePath, records);
   }
 
@@ -272,6 +287,31 @@ export class SessionStreamCardStore {
     return structuredClone(current);
   }
 
+  async reassign(threadId, fromTurnId, toTurnId, { createdAt = Date.now() } = {}) {
+    const sourceKey = recordKey(threadId, fromTurnId);
+    const targetKey = recordKey(threadId, toTurnId);
+    const target = this.records.get(targetKey);
+    if (target) return structuredClone(target);
+    const source = this.records.get(sourceKey);
+    if (!source) return undefined;
+    const reassigned = normalizeRecord({
+      ...source,
+      turnId: toTurnId,
+      progress: [],
+      createdAt,
+    });
+    this.records.delete(sourceKey);
+    this.records.set(targetKey, reassigned);
+    try {
+      await this.persist();
+    } catch (error) {
+      this.records.delete(targetKey);
+      this.records.set(sourceKey, source);
+      throw error;
+    }
+    return structuredClone(reassigned);
+  }
+
   async remove(threadId, turnId) {
     if (!this.records.delete(recordKey(threadId, turnId))) return false;
     await this.persist();
@@ -280,10 +320,6 @@ export class SessionStreamCardStore {
 
   async persist() {
     const snapshot = JSON.stringify(this.list(), null, 2);
-    this.writeTail = this.writeTail.then(
-      () => fs.writeFile(this.filePath, snapshot, "utf8"),
-      () => fs.writeFile(this.filePath, snapshot, "utf8"),
-    );
-    await this.writeTail;
+    await this.writeSnapshot(snapshot);
   }
 }

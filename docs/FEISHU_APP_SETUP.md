@@ -88,8 +88,8 @@ Windows 脚本使用相同的随机 loopback 跳转与两分钟本机 URL 备用
 应用/Bot 权限：
 
 - `im:message`：发送消息，并以 Bot 身份下载 owner 消息中的图片与附件；
-- `im:message.p2p_msg:readonly`：接收与机器人的单聊消息，支持可选的 `/add`；
-- `im:message.group_msg`：接收绑定群普通消息，无需 `@Bot`；
+- `im:message.p2p_msg:readonly`：接收与机器人的单聊消息，用于 `/chat`、`/add` 与后续私聊；
+- `im:message.group_msg`：接收群内普通消息，使仅含用户与 Bot 的绑定群无需 `@Bot`；
 - `im:chat:readonly`：读取群基本信息；
 - `im:chat.members:read`：验证群内只有绑定用户与 Bot；
 - `im:chat:create`：创建专属绑定群；
@@ -101,6 +101,10 @@ Windows 脚本使用相同的随机 loopback 跳转与两分钟本机 URL 备用
 - `im:feed_group_v1:write`：创建 Agent 标签并把绑定群加入标签；
 - `docx:document:create`：以当前用户身份创建长回答云文档；
 - `docx:document:write_only`：把完整 Markdown 回答写入新文档。
+
+如果需要使用 `/schedule` 自然语言日历助理，还要为应用开通 `calendar:calendar`。邀请同事时，按 lark-cli 返回的 `missing_scopes` 补充通讯录搜索所需权限；不要为只给自己创建日程的安装扩大通讯录权限。
+
+如果后台提示管理员审批，等待企业管理员批准后再继续。Bot 权限必须在开发者后台添加并重新发布应用；反复执行用户 OAuth 不能补上 Bot 权限。
 
 长连接事件：
 
@@ -183,3 +187,13 @@ Windows 完成故障回退后，必须运行：
 Lark CLI 的本机应用配置不能代替 Channel Bridge 自己的安全凭据。macOS 已在 B 节通过 `setup-channel-secret.sh` 存入 Keychain；Windows 已在 B 节通过 `setup-channel-secret.ps1` 使用 DPAPI 保存。两个脚本都可在生成 `bridge.config.json` 前执行。
 
 Secret 必须由用户在本机可见的隐藏提示中输入。不要从飞书 CLI 配置、进程、日志或系统凭据中提取明文，也不要要求用户在聊天中发送。
+
+## F. 可选：自然语言日历
+
+自然语言日历是可选能力。开发者后台开通并发布 `calendar:calendar` 后，再给当前用户增量授权：
+
+```powershell
+.\lark-cli.ps1 auth login --scope "calendar:calendar"
+```
+
+需要按姓名邀请同事时，可按最小权限原则额外运行 `auth login --domain contact --recommend`；如果飞书返回 `missing_scopes`，应先在开发者后台添加对应权限、发布应用，再重新执行用户授权。日历命令必须使用用户身份，Bot 身份看到的是 Bot 自己的日历。

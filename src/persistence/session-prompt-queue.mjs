@@ -1,5 +1,5 @@
-import { promises as fs } from "node:fs";
 import { normalizeCodexPromptAttachments } from "../feishu/feishu-inbound-attachment.mjs";
+import { createSerializedFileWriter, readJsonArrayFile } from "./serialized-json-file.mjs";
 
 export class SessionPromptQueueError extends Error {
   constructor(code, message, options) {
@@ -27,6 +27,7 @@ function normalizeRecord(record) {
     feishuThreadId: record.feishuThreadId ? String(record.feishuThreadId) : undefined,
     text,
     attachments,
+    dispatchReady: record.dispatchReady !== false,
     createdAt: Number(record.createdAt) || Date.now(),
   };
 }
@@ -53,7 +54,6 @@ export class SessionPromptQueue {
     onAccepted = async () => {},
     onError = () => {},
   } = {}) {
-    this.filePath = filePath;
     this.maxPerSession = maxPerSession;
     this.getController = getController;
     this.onAccepted = onAccepted;
@@ -62,20 +62,13 @@ export class SessionPromptQueue {
       const value = normalizeRecord(record);
       return [value.messageId, value];
     }));
-    this.writeTail = Promise.resolve();
+    this.writeSnapshot = createSerializedFileWriter(filePath);
     this.threadTails = new Map();
     this.dispatching = new Map();
   }
 
   static async open(filePath, options) {
-    let records = [];
-    try {
-      const value = JSON.parse(await fs.readFile(filePath, "utf8"));
-      if (!Array.isArray(value)) throw new TypeError("Session prompt queue must contain an array");
-      records = value;
-    } catch (error) {
-      if (error?.code !== "ENOENT") throw error;
-    }
+    const records = await readJsonArrayFile(filePath, "Session prompt queue");
     return new SessionPromptQueue(filePath, records, options);
   }
 
@@ -162,6 +155,20 @@ export class SessionPromptQueue {
     });
   }
 
+  async markDispatchReady(messageId) {
+    const current = this.records.get(String(messageId));
+    if (!current) return undefined;
+    return this.#serialize(current.sessionThreadId, async () => {
+      const record = this.records.get(String(messageId));
+      if (!record) return undefined;
+      if (!record.dispatchReady) {
+        record.dispatchReady = true;
+        await this.persist();
+      }
+      return Object.freeze(cloneRecord(record));
+    });
+  }
+
   async clear(sessionThreadId) {
     const target = String(sessionThreadId);
     return this.#serialize(target, async () => {
@@ -181,6 +188,9 @@ export class SessionPromptQueue {
       for (;;) {
         const record = this.list(target)[0];
         if (!record) return Object.freeze({ kind: "empty", reconciled });
+        if (!record.dispatchReady) {
+          return Object.freeze({ kind: "waiting", reason: "queue_card_pending", reconciled });
+        }
         const controller = this.getController();
         if (!controller) return Object.freeze({ kind: "waiting", reason: "controller_unavailable", reconciled });
         let result;
@@ -232,10 +242,6 @@ export class SessionPromptQueue {
 
   async persist() {
     const snapshot = JSON.stringify(this.list(), null, 2);
-    this.writeTail = this.writeTail.then(
-      () => fs.writeFile(this.filePath, snapshot, "utf8"),
-      () => fs.writeFile(this.filePath, snapshot, "utf8"),
-    );
-    await this.writeTail;
+    await this.writeSnapshot(snapshot);
   }
 }

@@ -9,7 +9,7 @@ import {
   SessionStreamCardStore,
 } from "../../../src/feishu/session-stream-card.mjs";
 
-test("plans a durable completion mention before native attachments", () => {
+test("sends only a brief completion mention after updating the stream card", () => {
   const records = buildSessionStreamCardFollowups({
     kind: "reply",
     deliveryId: "final-a",
@@ -22,27 +22,46 @@ test("plans a durable completion mention before native attachments", () => {
     fileName: "report.pdf",
     fileSize: 42,
     modifiedAtMs: 10,
-  }], "ou_owner");
+  }], { mentionOpenId: "ou_owner" });
 
   assert.equal(records.length, 2);
-  assert.equal(records[0].deliveryId, "final-a:mention");
-  assert.equal(records[0].post.zh_cn.content[0][0].tag, "at");
+  assert.equal(records[0].deliveryId, "final-a");
+  assert.equal(records[0].kind, "reply");
+  assert.deepEqual(records[0].post.zh_cn.content, [[
+    { tag: "at", user_id: "ou_owner" },
+    { tag: "text", text: " 已完成" },
+  ]]);
   assert.equal(records[1].kind, "file");
-  assert.equal(records[1].dependsOn, "final-a:mention");
+  assert.equal(records[1].dependsOn, "final-a");
 });
 
-test("sends native attachments directly when final mentions are disabled", () => {
+test("sends a brief proactive completion mention before native attachments", () => {
   const records = buildSessionStreamCardFollowups({
     kind: "send",
     deliveryId: "final-b",
     chatId: "chat-b",
     createdAt: 100,
-  }, [{ localPath: "C:\\tmp\\result.zip", fileName: "result.zip" }]);
+  }, [{ localPath: "C:\\tmp\\result.zip", fileName: "result.zip" }], {
+    mentionOpenId: "ou_owner",
+  });
 
-  assert.equal(records.length, 1);
-  assert.equal(records[0].kind, "file");
-  assert.equal(records[0].dependsOn, undefined);
+  assert.equal(records.length, 2);
+  assert.equal(records[0].kind, "send");
+  assert.equal(records[1].kind, "file");
+  assert.equal(records[1].dependsOn, "final-b");
   assert.equal(records[0].messageId, undefined);
+});
+
+test("does not duplicate card content when final mentions are disabled", () => {
+  const records = buildSessionStreamCardFollowups({
+    kind: "reply",
+    deliveryId: "final-c",
+    messageId: "message-c",
+    chatId: "chat-c",
+    post: { zh_cn: { content: [[{ tag: "md", text: "full answer" }]] } },
+  }, []);
+
+  assert.deepEqual(records, []);
 });
 
 test("builds one updateable progress card from public commentary", () => {
@@ -62,6 +81,33 @@ test("builds one updateable progress card from public commentary", () => {
   assert.match(card.body.elements[0].content, /- 测试列表/);
   assert.match(card.body.elements[0].content, /已处理：1分1秒/);
   assert.doesNotMatch(JSON.stringify(card), /reasoning|tool output/i);
+});
+
+test("builds the queued acknowledgement as the initial stream card state", () => {
+  const card = buildSessionStreamCard({
+    queued: { position: 2, alreadyQueued: false },
+  });
+
+  assert.equal(card.schema, "2.0");
+  assert.equal(card.body.elements.length, 1);
+  assert.match(card.body.elements[0].content, /已按默认设置加入下一轮队列/);
+  assert.match(card.body.elements[0].content, /当前排位：\*\*2\*\*/);
+  assert.match(card.body.elements[0].content, /独立的新 Turn/);
+  assert.match(card.config.summary.content, /排队中/);
+});
+
+test("keeps a queued Prompt visible when its Session writer is occupied", () => {
+  const card = buildSessionStreamCard({
+    queued: {
+      status: "blocked",
+      reason: "当前 Session 的写入权限正被 Codex Desktop 或 CLI 占用。",
+    },
+  });
+
+  assert.equal(card.schema, "2.0");
+  assert.match(card.body.elements[0].content, /Session 写入权限冲突/);
+  assert.match(card.body.elements[0].content, /Codex Desktop 或 CLI/);
+  assert.match(card.body.elements[0].content, /仍保留在队列中/);
 });
 
 test("preserves markdown and images when the same card becomes the final answer", () => {
@@ -117,6 +163,25 @@ test("persists one card per turn and deduplicates progress", async () => {
   assert.equal(reopened.get("thread-a", "turn-a"), undefined);
 });
 
+test("reassigns a queued card to its real Turn without changing the Feishu message", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "session-stream-card-adopt-"));
+  const filePath = path.join(directory, "cards.json");
+  const store = await SessionStreamCardStore.open(filePath);
+  await store.start({
+    threadId: "thread-a",
+    turnId: "queued:input-a",
+    chatId: "chat-a",
+    messageId: "card-a",
+    createdAt: 100,
+  });
+
+  const adopted = await store.reassign("thread-a", "queued:input-a", "turn-a", { createdAt: 200 });
+  assert.equal(adopted.messageId, "card-a");
+  assert.equal(adopted.createdAt, 200);
+  assert.equal(store.get("thread-a", "queued:input-a"), undefined);
+  assert.equal(store.get("thread-a", "turn-a").messageId, "card-a");
+});
+
 test("routes public progress and completion through the persistent card only in turn handlers", async () => {
   const source = await readFile(new URL("../../../src/app/session-relay.mjs", import.meta.url), "utf8");
   const commandStart = source.indexOf("async function processCommandMessage");
@@ -131,5 +196,6 @@ test("routes public progress and completion through the persistent card only in 
   assert.match(progressBody, /appendProgress/);
   assert.match(progressBody, /channel\.updateCard/);
   assert.match(completionBody, /tryCompleteTurnStreamCard/);
-  assert.match(source, /onAccepted:[\s\S]*tryEnsureTurnStreamCard/);
+  assert.match(source, /onAccepted:[\s\S]*tryAdoptQueuedStreamCard/);
+  assert.doesNotMatch(source, /deliveryId: `default-queue:/);
 });
